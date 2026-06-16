@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.sqlite3
+*.db
+*.log
+.env
+.venv/
+venv/
+
+# Local/generated Telegram emoji sheets and picks
+emoji_pick/
+emoji_sheets*/
+
+# Runtime-generated inline images
+inline/
+tmp/
