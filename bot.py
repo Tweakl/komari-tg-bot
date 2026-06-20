@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import concurrent.futures
 import html
 import http.server
 import json
@@ -26,7 +27,7 @@ OWNER_IDS = {int(x) for x in re.split(r"[,\s]+", os.getenv("OWNER_IDS", "")) if 
 DB_PATH = os.getenv("DB_PATH", "/opt/komari-tg-bot/bot.sqlite3")
 TZ = dt.timezone(dt.timedelta(hours=8), "CST")
 TG_API = f"https://api.telegram.org/bot{TOKEN}"
-USER_AGENT = "komari-tg-bot/1.3"
+USER_AGENT = "komari-tg-bot/1.4.0"
 BOT_USERNAME = ""
 LAST_PROFILE_UPDATE = 0.0
 GROUP_AUTO_DELETE_SECONDS = 120
@@ -46,7 +47,7 @@ INLINE_DYNAMIC_IMAGES: dict[str, tuple[float, dict[str, Any], int]] = {}
 INLINE_DELAY_JOBS: dict[str, tuple[float, dict[str, Any], int, str]] = {}
 INLINE_TEXT_JOBS: dict[str, tuple[float, str, dict[str, Any], int | None, bool]] = {}
 INLINE_IMAGE_LOCK = threading.Lock()
-INLINE_RESULT_VERSION = "groupplain20260614a"
+INLINE_RESULT_VERSION = "groupfast20260620"
 CUSTOM_EMOJIS = {
     "console": ("💻", "5213323619911868787"),
     "stats": ("📊", "5190806721286657692"),
@@ -75,7 +76,7 @@ BIND_USAGE = (
     "<pre>/bind  面板URL  APIKEY  面板备注\n"
     "公开面板 APIKEY 可填写 -</pre>\n\n"
     "示例\n"
-    "<pre>/bind https://akile.us/ abc123 我的面板</pre>"
+    "<pre>/bind https://komari.example.com - 我的面板</pre>"
 )
 
 ALIASES = {
@@ -369,7 +370,11 @@ def schedule_delete(chat_id: int, message_id: int, seconds: int = 120) -> None:
 
 
 def private_chat_url() -> str:
-    return f"https://t.me/{BOT_USERNAME}" if BOT_USERNAME else "https://t.me/TweakKomari_bot"
+    return f"https://t.me/{BOT_USERNAME}" if BOT_USERNAME else "https://t.me"
+
+
+def bot_mention() -> str:
+    return f"@{BOT_USERNAME}" if BOT_USERNAME else "@your_bot"
 
 
 def private_chat_keyboard() -> dict[str, Any]:
@@ -412,10 +417,7 @@ def upload_photo_file_id(chat_id: int, path: str) -> str:
     photos = result.get("photo") or []
     file_id = str((photos[-1] or {}).get("file_id") or "") if photos else ""
     if message_id:
-        try:
-            delete_message(chat_id, int(message_id))
-        except Exception:
-            pass
+        threading.Thread(target=delete_message, args=(chat_id, int(message_id)), daemon=True).start()
     if not file_id:
         raise RuntimeError("上传战报图片失败：Telegram 没有返回 file_id")
     return file_id
@@ -1487,7 +1489,20 @@ def latency_value(value: Any) -> float | None:
     return num if num >= 0 else None
 
 
+def raw_latency_value(value: Any) -> float | None:
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def latency_display(value: float) -> str:
+    return "超时" if value < 0 else f"{value:.0f}ms"
+
+
 def latency_bar(value: float, max_value: float, width: int = 14) -> str:
+    if value < 0:
+        return "▱" * width
     if max_value <= 0:
         filled = 1
     else:
@@ -1506,14 +1521,24 @@ def delay_report_rows(panel: sqlite3.Row, task_id: int) -> tuple[str, str, list[
     rows: list[dict[str, Any]] = []
     task_name = f"任务 {task_id}"
     task_type = "ICMP"
-    for node in nodes:
+
+    def load_node_ping(node: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]] | None:
         uuid = node_uuid(node)
         if not uuid:
-            continue
+            return None
         try:
-            data = fetch_ping_data(panel, uuid, 1)
+            return node, fetch_ping_data(panel, uuid, 1)
         except Exception:
+            return None
+
+    worker_count = min(8, max(1, len(nodes)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+        node_data = list(executor.map(load_node_ping, nodes))
+
+    for item in node_data:
+        if item is None:
             continue
+        node, data = item
         for task in data.get("tasks") or []:
             if isinstance(task, dict) and as_int(task.get("id")) == task_id:
                 task_name = str(task.get("name") or task_name)
@@ -1522,22 +1547,27 @@ def delay_report_rows(panel: sqlite3.Row, task_id: int) -> tuple[str, str, list[
         records = [
             record
             for record in (data.get("records") or [])
-            if isinstance(record, dict) and as_int(record.get("task_id")) == task_id and latency_value(record.get("value")) is not None
+            if isinstance(record, dict) and as_int(record.get("task_id")) == task_id and raw_latency_value(record.get("value")) is not None
         ]
         if not records:
             continue
         records.sort(key=lambda record: str(record.get("time") or ""), reverse=True)
-        values = [latency_value(record.get("value")) for record in records]
-        values = [value for value in values if value is not None]
-        if not values:
-            continue
-        latest = latency_value(records[0].get("value"))
-        if latest is None:
-            latest = values[0]
-        avg = sum(values) / len(values)
-        rows.append({"name": node_name(node).strip(), "latest": latest, "avg": avg, "count": len(values)})
+        raw_values = [raw_latency_value(record.get("value")) for record in records]
+        raw_values = [value for value in raw_values if value is not None]
+        values = [value for value in raw_values if value >= 0]
+        if values:
+            latest = raw_latency_value(records[0].get("value"))
+            if latest is None or latest < 0:
+                latest = values[0]
+            avg = sum(values) / len(values)
+            count = len(values)
+        else:
+            latest = -1.0
+            avg = -1.0
+            count = len(raw_values)
+        rows.append({"name": node_name(node).strip(), "latest": latest, "avg": avg, "count": count})
 
-    rows.sort(key=lambda item: (item["avg"], item["latest"], item["name"].lower()))
+    rows.sort(key=lambda item: (item["avg"] < 0, item["avg"] if item["avg"] >= 0 else 999999, item["latest"] if item["latest"] >= 0 else 999999, item["name"].lower()))
     return task_name, task_type, rows
 
 
@@ -1561,8 +1591,8 @@ def delay_report_text(panel: sqlite3.Row, task_id: int) -> str:
         latest = float(item["latest"])
         avg = float(item["avg"])
         lines.append(f"{rank_badge(idx)} {item['name']}")
-        lines.append(f"   实时 {latency_bar(latest, latest_max)} {latest:.0f}ms")
-        lines.append(f"   均值 {latency_bar(avg, avg_max)} {avg:.0f}ms")
+        lines.append(f"   实时 {latency_bar(latest, latest_max)} {latency_display(latest)}")
+        lines.append(f"   均值 {latency_bar(avg, avg_max)} {latency_display(avg)}")
     if len(rows) > 25:
         lines.append(f"... 还有 {len(rows) - 25} 台未显示")
     lines.append("")
@@ -1646,6 +1676,8 @@ def avg_color(value: float) -> tuple[str, str]:
 
 
 def latency_level(value: float) -> tuple[str, str, str]:
+    if value < 0:
+        return "超时", "#ffb3a3", "#542b24"
     if value <= 30:
         return "极速", "#69e58d", "#183f2a"
     if value <= 80:
@@ -1748,9 +1780,13 @@ def create_delay_report_image(panel: sqlite3.Row | dict[str, Any], task_id: int,
 
     avg_values = [float(item["avg"]) for item in rows]
     latest_values = [float(item["latest"]) for item in rows]
-    fastest = min(avg_values)
-    slowest = max(avg_values)
-    global_avg = sum(avg_values) / len(avg_values)
+    reachable_avg_values = [value for value in avg_values if value >= 0]
+    reachable_latest_values = [value for value in latest_values if value >= 0]
+    fastest = min(reachable_avg_values) if reachable_avg_values else -1.0
+    slowest = max(reachable_avg_values) if reachable_avg_values else -1.0
+    global_avg = sum(reachable_avg_values) / len(reachable_avg_values) if reachable_avg_values else -1.0
+    fastest_node = next((item["name"][:18] for item in rows if float(item["avg"]) == fastest), "全部超时")
+    slowest_node = next((item["name"][:18] for item in reversed(rows) if float(item["avg"]) == slowest), "全部超时")
 
     round_rect(draw, (64, 52, 370, 104), 26, "#292e3d")
     draw.ellipse((88, 72, 106, 90), fill="#31e8a5")
@@ -1769,16 +1805,16 @@ def create_delay_report_image(panel: sqlite3.Row | dict[str, Any], task_id: int,
     draw.text((1384, 130), "1小时均值", font=small_font, fill="#dce6f7")
 
     card_fonts = (small_font, value_font, small_font)
-    metric_card(draw, (64, 278, 420, 392), "最快节点", f"{fastest:.0f}ms", rows[0]["name"][:18], "#31e8a5", card_fonts)
-    metric_card(draw, (440, 278, 796, 392), "全局均值", f"{global_avg:.0f}ms", "所有节点平均表现", "#39a7ff", card_fonts)
-    metric_card(draw, (816, 278, 1172, 392), "最高延迟", f"{slowest:.0f}ms", rows[-1]["name"][:18], "#f4d35e", card_fonts)
-    metric_card(draw, (1192, 278, 1536, 392), "实时峰值", f"{max(latest_values):.0f}ms", "当前采样最大值", "#ff8c6d", card_fonts)
+    metric_card(draw, (64, 278, 420, 392), "最快节点", latency_display(fastest), fastest_node, "#31e8a5", card_fonts)
+    metric_card(draw, (440, 278, 796, 392), "全局均值", latency_display(global_avg), "可达节点平均表现" if reachable_avg_values else "没有可达采样", "#39a7ff", card_fonts)
+    metric_card(draw, (816, 278, 1172, 392), "最高延迟", latency_display(slowest), slowest_node, "#f4d35e", card_fonts)
+    metric_card(draw, (1192, 278, 1536, 392), "实时峰值", latency_display(max(reachable_latest_values) if reachable_latest_values else -1.0), "当前采样最大值" if reachable_latest_values else "没有可达采样", "#ff8c6d", card_fonts)
 
     draw.arc((1080, 0, 1700, 620), 205, 345, fill="#1f6ca8")
     draw.arc((1160, 58, 1630, 528), 200, 330, fill="#1a4f79")
 
-    latest_max = max(item["latest"] for item in rows) or 1
-    avg_max = max(item["avg"] for item in rows) or 1
+    latest_max = max([item["latest"] for item in rows if item["latest"] >= 0] or [1])
+    avg_max = max([item["avg"] for item in rows if item["avg"] >= 0] or [1])
     for idx, item in enumerate(rows, 1):
         y = top + (idx - 1) * row_h
         card_fill = "#1a2233" if idx % 2 else "#151e2e"
@@ -1793,14 +1829,14 @@ def create_delay_report_image(panel: sqlite3.Row | dict[str, Any], task_id: int,
         avg = float(item["avg"])
         draw.text((430, y + 16), "LIVE", font=small_font, fill="#74839c")
         draw.text((438, y + 52), "AVG", font=small_font, fill="#74839c")
-        rounded_bar(draw, (516, y + 15, 1112, y + 42), latest / latest_max, "#39a7ff", "#27344e")
-        draw.text((1138, y + 8), f"{latest:.0f}ms", font=row_font, fill="#9bd3ff")
-        rounded_bar(draw, (516, y + 51, 1112, y + 78), avg / avg_max, "#6de08f", "#27344e")
-        draw.text((1138, y + 44), f"{avg:.0f}ms", font=row_font, fill="#a2ecb8")
+        rounded_bar(draw, (516, y + 15, 1112, y + 42), 0 if latest < 0 else latest / latest_max, "#39a7ff", "#27344e")
+        draw.text((1138, y + 8), latency_display(latest), font=row_font, fill="#9bd3ff")
+        rounded_bar(draw, (516, y + 51, 1112, y + 78), 0 if avg < 0 else avg / avg_max, "#6de08f", "#27344e")
+        draw.text((1138, y + 44), latency_display(avg), font=row_font, fill="#a2ecb8")
 
         level, pill_fill, pill_text = latency_level(avg)
         round_rect(draw, (1360, y + 20, 1538, y + 60), 20, pill_text)
-        draw.text((1382, y + 21), f"{level} {avg:.0f}ms", font=row_font, fill=pill_fill)
+        draw.text((1382, y + 21), f"{level} {latency_display(avg)}", font=row_font, fill=pill_fill)
 
     footer_time = now_text()
     draw.text((68, height - 58), f"节点 {len(rows)} 台 · 测试 {rows[0]['count']} 次 · {task_type}", font=small_font, fill="#8792a7")
@@ -2216,7 +2252,7 @@ def inline_node_detail_result(
             f"node-help:{panel['id']}",
             "🖥 服务器详情",
             "请输入",
-            "🖥 服务器详情\n━━━━━━━━━━━━━━━━━━━━\n请在 @TweakKomari_bot 后面输入节点编号。\n\n示例：@TweakKomari_bot 01",
+            f"🖥 服务器详情\n━━━━━━━━━━━━━━━━━━━━\n请在 {bot_mention()} 后面输入节点编号。\n\n示例：{bot_mention()} 01",
             thumbnail_url=inline_thumbnail("node"),
         )
     matches = inline_node_matches(nodes, latest, sid_map, query)
@@ -2229,6 +2265,14 @@ def inline_node_detail_result(
             thumbnail_url=inline_thumbnail("node"),
         )
     matched_sid, node, status = matches[0]
+    if not show_refresh:
+        return inline_article_result(
+            f"node-static:{panel['id']}:{matched_sid}",
+            "🖥 服务器详情",
+            f"{node_name(node)} · {'在线' if status.get('online') else '离线'}",
+            detail_plain_text_from_node(panel, matched_sid, node, status),
+            thumbnail_url=inline_thumbnail("node"),
+        )
     return inline_text_job_result(
         "node",
         panel,
@@ -2287,12 +2331,12 @@ def inline_text_job_result(
 def finish_inline_text_job(inline_message_id: str, token: str) -> None:
     job = INLINE_TEXT_JOBS.get(token)
     if not job:
-        edit_inline_message_text(inline_message_id, "这条内联数据已经过期，请重新打开 @TweakKomari_bot 发送。")
+        edit_inline_message_text(inline_message_id, f"这条内联数据已经过期，请重新打开 {bot_mention()} 发送。")
         return
     expires, kind, panel, sid, show_refresh = job
     if expires < time.time():
         INLINE_TEXT_JOBS.pop(token, None)
-        edit_inline_message_text(inline_message_id, "这条内联数据已经过期，请重新打开 @TweakKomari_bot 发送。")
+        edit_inline_message_text(inline_message_id, f"这条内联数据已经过期，请重新打开 {bot_mention()} 发送。")
         return
     try:
         if show_refresh:
@@ -2386,7 +2430,7 @@ def finish_inline_delay_report(inline_message_id: str, token: str) -> None:
     if not job:
         edit_inline_message_text(
             inline_message_id,
-            "📡 Komari Delay Radar\n━━━━━━━━━━━━━━━━━━━━\n这个延迟战报任务已经过期，请重新打开 @TweakKomari_bot 菜单选择。",
+            f"📡 Komari Delay Radar\n━━━━━━━━━━━━━━━━━━━━\n这个延迟战报任务已经过期，请重新打开 {bot_mention()} 菜单选择。",
         )
         return
     expires, panel, task_id, task_name = job
@@ -2394,10 +2438,11 @@ def finish_inline_delay_report(inline_message_id: str, token: str) -> None:
         INLINE_DELAY_JOBS.pop(token, None)
         edit_inline_message_text(
             inline_message_id,
-            "📡 Komari Delay Radar\n━━━━━━━━━━━━━━━━━━━━\n这个延迟战报任务已经过期，请重新打开 @TweakKomari_bot 菜单选择。",
+            f"📡 Komari Delay Radar\n━━━━━━━━━━━━━━━━━━━━\n这个延迟战报任务已经过期，请重新打开 {bot_mention()} 菜单选择。",
         )
         return
     try:
+        total_started = time.perf_counter()
         edit_inline_message_text(
             inline_message_id,
             (
@@ -2409,9 +2454,15 @@ def finish_inline_delay_report(inline_message_id: str, token: str) -> None:
             ),
             inline_delay_keyboard(token, "重新生成"),
         )
+        progress_seconds = time.perf_counter() - total_started
+        render_started = time.perf_counter()
         generated_name, count, image_path = create_inline_delay_image(panel, task_id)
+        render_seconds = time.perf_counter() - render_started
         try:
+            upload_started = time.perf_counter()
             file_id = upload_photo_file_id(inline_upload_chat_id(panel), image_path)
+            upload_seconds = time.perf_counter() - upload_started
+            edit_started = time.perf_counter()
             edit_inline_message_media(
                 inline_message_id,
                 {
@@ -2419,7 +2470,16 @@ def finish_inline_delay_report(inline_message_id: str, token: str) -> None:
                     "media": file_id,
                     "caption": f"{generated_name} · 延迟排名 · {count} 台 VPS",
                 },
-                inline_delay_keyboard(token, "刷新战报"),
+            )
+            edit_seconds = time.perf_counter() - edit_started
+            log.info(
+                "inline delay report task=%s progress=%.3fs render=%.3fs upload=%.3fs edit=%.3fs total=%.3fs",
+                task_id,
+                progress_seconds,
+                render_seconds,
+                upload_seconds,
+                edit_seconds,
+                time.perf_counter() - total_started,
             )
         finally:
             try:
@@ -2503,16 +2563,24 @@ def handle_inline_query(query: dict[str, Any]) -> None:
 
     try:
         nodes, latest, sid_map = load_panel(panel)
-        results: list[dict[str, Any]] = [
-            inline_text_job_result(
+        if show_inline_refresh:
+            stats_result = inline_text_job_result(
                 "stats",
                 panel,
                 None,
                 f"📊 统计信息 · {panel['name']}",
                 "点击发送当前面板统计信息",
-                show_inline_refresh,
+                True,
             )
-        ]
+        else:
+            stats_result = inline_article_result(
+                f"stats-static:{panel['id']}",
+                f"📊 统计信息 · {panel['name']}",
+                "点击发送当前面板统计信息",
+                aggregate_plain_text_from_data(panel, nodes, latest),
+                thumbnail_url=inline_thumbnail("stats"),
+            )
+        results: list[dict[str, Any]] = [stats_result]
         results.append(inline_node_detail_result(panel, nodes, latest, sid_map, keyword, show_inline_refresh))
 
         sid_query = inline_sid_query(keyword)
@@ -3016,7 +3084,7 @@ def run_loop() -> None:
                     elif "callback_query" in update:
                         handle_callback(update["callback_query"])
                     elif "inline_query" in update:
-                        handle_inline_query(update["inline_query"])
+                        threading.Thread(target=handle_inline_query, args=(update["inline_query"],), daemon=True).start()
                     elif "chosen_inline_result" in update:
                         handle_chosen_inline_result(update["chosen_inline_result"])
                 except Exception:
