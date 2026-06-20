@@ -10,6 +10,8 @@ Komari TG Bot 是一个对接 Komari 面板的 Telegram 探针机器人。它支
 - 私聊按钮菜单：统计信息、面板管理、节点查询、续费查询、延迟战报、用户权限
 - 群组命令：`/all` 查看统计，`/sid 编号` 查看节点详情
 - 内联模式：在任意聊天输入 `@你的机器人` 后选择统计、服务器详情或延迟战报
+- 群内统计与服务器详情直接发送，减少二次编辑等待
+- 延迟战报并发读取节点数据，并正确显示超时节点
 - 群组里的机器人消息自动清理，减少刷屏
 - 延迟战报可生成科技风排序图片
 
@@ -25,16 +27,13 @@ Komari TG Bot 是一个对接 Komari 面板的 Telegram 探针机器人。它支
 0) 退出
 ```
 
-选择安装后，会提示你输入：
-
-- 机器人 Token
-- 你的 Telegram 数字 ID
+选择安装后，会提示你输入机器人 Token 和 Telegram 数字 ID：
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/Tweakl/komari-tg-bot/main/install.sh)
 ```
 
-也可以直接进入安装：
+直接进入安装：
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/Tweakl/komari-tg-bot/main/install.sh) install
@@ -46,15 +45,10 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Tweakl/komari-tg-bot/main/in
 bash <(curl -fsSL https://raw.githubusercontent.com/Tweakl/komari-tg-bot/main/install.sh) uninstall
 ```
 
-安装完成后查看状态：
+安装完成后查看状态和日志：
 
 ```bash
 systemctl status komari-tg-bot --no-pager
-```
-
-查看日志：
-
-```bash
 journalctl -u komari-tg-bot -f
 ```
 
@@ -67,13 +61,13 @@ journalctl -u komari-tg-bot -f
 | `DB_PATH` | 否 | SQLite 数据库路径，默认 `/opt/komari-tg-bot/bot.sqlite3` |
 | `INLINE_IMAGE_SERVER_ENABLED` | 否 | 是否启用内置图片 HTTP 服务，默认 `0` |
 | `INLINE_IMAGE_PORT` | 否 | 内置图片服务端口，默认 `80` |
-| `INLINE_PUBLIC_BASE_URL` | 否 | 延迟战报等图片可被 Telegram 访问的公网地址 |
+| `INLINE_PUBLIC_BASE_URL` | 否 | 图片服务的公网地址；不配置时使用本地地址 |
 
-如果要使用内联延迟战报图片，建议配置反代域名并设置：
+如需启用内置图片服务，请自行配置公网 HTTPS 地址：
 
 ```bash
 INLINE_IMAGE_SERVER_ENABLED=1
-INLINE_PUBLIC_BASE_URL=https://你的域名
+INLINE_PUBLIC_BASE_URL=https://your-domain.example.com
 ```
 
 ## BotFather 设置
@@ -90,7 +84,7 @@ INLINE_PUBLIC_BASE_URL=https://你的域名
 输入节点ID、关键词或延迟任务
 ```
 
-内联反馈建议开启：
+建议开启内联反馈：
 
 ```text
 /setinlinefeedback
@@ -122,6 +116,8 @@ INLINE_PUBLIC_BASE_URL=https://你的域名
 
 ## 更新
 
+再次运行安装命令并选择“安装 / 更新”，或手动执行：
+
 ```bash
 cd /opt/komari-tg-bot
 git pull --ff-only
@@ -130,6 +126,8 @@ systemctl restart komari-tg-bot
 
 ## 安全提醒
 
-- 不要把 `TELEGRAM_BOT_TOKEN`、Komari API Key、数据库文件提交到 GitHub
-- 生产环境建议使用 HTTPS 域名作为 `INLINE_PUBLIC_BASE_URL`
+- 不要把 `TELEGRAM_BOT_TOKEN`、Komari API Key、`.env` 或数据库文件提交到 GitHub
+- 示例配置仅使用占位值；请在服务器本地 `.env` 中填写真实值
 - 如果机器人 Token 泄露，请立即到 BotFather 重置
+
+版本变化见 [CHANGELOG.md](CHANGELOG.md)。
