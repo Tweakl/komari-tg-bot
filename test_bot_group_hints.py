@@ -37,7 +37,7 @@ class GroupPrivateHintTests(unittest.TestCase):
 
     def run_message(self, message):
         with (
-            patch.object(bot, "BOT_USERNAME", "TweakKomari_bot"),
+            patch.object(bot, "BOT_USERNAME", "example_bot"),
             patch.object(bot, "touch_user", lambda *args, **kwargs: None),
             patch.object(bot, "update_bot_profile", lambda *args, **kwargs: None),
             patch.object(bot, "require_allowed", lambda *args, **kwargs: True),
@@ -62,7 +62,7 @@ class GroupPrivateHintTests(unittest.TestCase):
         self.assertIn("请去私聊绑定/操作", text)
         self.assertNotIn("这条提示将在", text)
         self.assertNotIn(bot.BIND_USAGE, text)
-        self.assertEqual(reply_markup["inline_keyboard"][0][0]["url"], "https://t.me/TweakKomari_bot")
+        self.assertEqual(reply_markup["inline_keyboard"][0][0]["url"], "https://t.me/example_bot")
         self.assertEqual(self.scheduled, [(-100123, 321, 120)])
 
     def test_group_private_only_command_uses_same_private_chat_hint(self):
@@ -135,7 +135,7 @@ class GroupPrivateHintTests(unittest.TestCase):
             return {"ok": True, "result": {}}
 
         with (
-            patch.object(bot, "BOT_USERNAME", "TweakKomari_bot"),
+            patch.object(bot, "BOT_USERNAME", "example_bot"),
             patch.object(bot, "touch_user", lambda *args, **kwargs: None),
             patch.object(bot, "update_bot_profile", lambda *args, **kwargs: None),
             patch.object(bot, "is_allowed", lambda *args, **kwargs: True),
@@ -149,7 +149,7 @@ class GroupPrivateHintTests(unittest.TestCase):
         self.assertTrue(payload["is_personal"])
         self.assertEqual(payload["results"][0]["type"], "article")
         self.assertIn("请去私聊绑定/操作", payload["results"][0]["title"])
-        self.assertEqual(payload["results"][0]["reply_markup"]["inline_keyboard"][0][0]["url"], "https://t.me/TweakKomari_bot")
+        self.assertEqual(payload["results"][0]["reply_markup"]["inline_keyboard"][0][0]["url"], "https://t.me/example_bot")
 
     def test_inline_query_returns_stats_node_prompt_and_delay_options(self):
         calls = []
@@ -162,7 +162,7 @@ class GroupPrivateHintTests(unittest.TestCase):
             return {"ok": True, "result": {}}
 
         with (
-            patch.object(bot, "BOT_USERNAME", "TweakKomari_bot"),
+            patch.object(bot, "BOT_USERNAME", "example_bot"),
             patch.object(bot, "touch_user", lambda *args, **kwargs: None),
             patch.object(bot, "update_bot_profile", lambda *args, **kwargs: None),
             patch.object(bot, "is_allowed", lambda *args, **kwargs: True),
@@ -187,7 +187,7 @@ class GroupPrivateHintTests(unittest.TestCase):
         self.assertTrue(results[0]["reply_markup"]["inline_keyboard"][0][0]["callback_data"].startswith("inline_text:"))
         self.assertEqual(results[1]["title"], "🖥 服务器详情")
         self.assertEqual(results[1]["description"], "请输入")
-        self.assertIn("请在 @TweakKomari_bot 后面输入节点编号", results[1]["input_message_content"]["message_text"])
+        self.assertIn("请在 @example_bot 后面输入节点编号", results[1]["input_message_content"]["message_text"])
         delay_results = [item for item in results if item["type"] == "article" and item["title"] == "📡 山东联通"]
         self.assertEqual(len(delay_results), 1)
         self.assertTrue(delay_results[0]["id"].startswith("delay:"))
@@ -212,7 +212,7 @@ class GroupPrivateHintTests(unittest.TestCase):
             return {"ok": True, "result": {}}
 
         with (
-            patch.object(bot, "BOT_USERNAME", "TweakKomari_bot"),
+            patch.object(bot, "BOT_USERNAME", "example_bot"),
             patch.object(bot, "touch_user", lambda *args, **kwargs: None),
             patch.object(bot, "update_bot_profile", lambda *args, **kwargs: None),
             patch.object(bot, "is_allowed", lambda *args, **kwargs: True),
@@ -276,7 +276,7 @@ class GroupPrivateHintTests(unittest.TestCase):
 
         self.assertEqual(started, [("inline-message-2", "abc123")])
 
-    def test_group_inline_text_job_uses_old_plain_text_without_refresh_button(self):
+    def test_group_inline_stats_returns_final_plain_text_without_refresh_button(self):
         calls = []
         panel = {"id": 2, "name": "Tweak", "base_url": "https://example.com", "api_key": ""}
 
@@ -295,10 +295,13 @@ class GroupPrivateHintTests(unittest.TestCase):
         ):
             bot.handle_inline_query({"id": "inline-group", "query": "", "from": {"id": 42}, "chat_type": "supergroup"})
             result_id = calls[-1][1]["results"][0]["id"]
-            placeholder = calls[-1][1]["results"][0]["input_message_content"]
-            self.assertIn("message_text", placeholder)
-            self.assertIn("点击发送数据", placeholder["message_text"])
-            self.assertNotIn("rich_message", placeholder)
+            result = calls[-1][1]["results"][0]
+            content = result["input_message_content"]
+            self.assertTrue(result_id.startswith("stats-static:"))
+            self.assertNotIn("reply_markup", result)
+            self.assertIn("📊 统计信息 · Tweak", content["message_text"])
+            self.assertIn("🖥 服务器", content["message_text"])
+            self.assertNotIn("<tg-emoji", content["message_text"])
             bot.handle_chosen_inline_result(
                 {
                     "result_id": result_id,
@@ -309,16 +312,9 @@ class GroupPrivateHintTests(unittest.TestCase):
             )
             time.sleep(0.05)
 
-        edit_calls = [payload for method, payload in calls if method == "editMessageText"]
-        self.assertTrue(edit_calls)
-        self.assertNotIn("reply_markup", edit_calls[-1])
-        self.assertIn("text", edit_calls[-1])
-        self.assertNotIn("rich_message", edit_calls[-1])
-        self.assertIn("📊 统计信息 · Tweak", edit_calls[-1]["text"])
-        self.assertIn("🖥 服务器", edit_calls[-1]["text"])
-        self.assertNotIn("<tg-emoji", edit_calls[-1]["text"])
+        self.assertFalse([payload for method, payload in calls if method == "editMessageText"])
 
-    def test_group_inline_node_detail_uses_old_plain_text_without_refresh_button(self):
+    def test_group_inline_node_detail_returns_final_plain_text_without_refresh_button(self):
         calls = []
         panel = {"id": 2, "name": "Tweak", "base_url": "https://example.com", "api_key": ""}
         node = {
@@ -354,7 +350,7 @@ class GroupPrivateHintTests(unittest.TestCase):
             return {"ok": True, "result": {}}
 
         with (
-            patch.object(bot, "BOT_USERNAME", "TweakKomari_bot"),
+            patch.object(bot, "BOT_USERNAME", "example_bot"),
             patch.object(bot, "touch_user", lambda *args, **kwargs: None),
             patch.object(bot, "update_bot_profile", lambda *args, **kwargs: None),
             patch.object(bot, "is_allowed", lambda *args, **kwargs: True),
@@ -367,10 +363,12 @@ class GroupPrivateHintTests(unittest.TestCase):
             bot.handle_inline_query({"id": "inline-group-node", "query": "01", "from": {"id": 42}, "chat_type": "supergroup"})
             node_result = next(item for item in calls[-1][1]["results"] if "服务器详情" in item["title"])
             result_id = node_result["id"]
-            placeholder = node_result["input_message_content"]
-            self.assertIn("message_text", placeholder)
-            self.assertIn("点击发送数据", placeholder["message_text"])
-            self.assertNotIn("rich_message", placeholder)
+            content = node_result["input_message_content"]
+            self.assertTrue(result_id.startswith("node-static:"))
+            self.assertNotIn("reply_markup", node_result)
+            self.assertIn("🖥 Xboard · 在线", content["message_text"])
+            self.assertIn("🧠 处理器", content["message_text"])
+            self.assertNotIn("<tg-emoji", content["message_text"])
             bot.handle_chosen_inline_result(
                 {
                     "result_id": result_id,
@@ -381,14 +379,7 @@ class GroupPrivateHintTests(unittest.TestCase):
             )
             time.sleep(0.05)
 
-        edit_calls = [payload for method, payload in calls if method == "editMessageText"]
-        self.assertTrue(edit_calls)
-        self.assertNotIn("reply_markup", edit_calls[-1])
-        self.assertIn("text", edit_calls[-1])
-        self.assertNotIn("rich_message", edit_calls[-1])
-        self.assertIn("🖥 Xboard · 在线", edit_calls[-1]["text"])
-        self.assertIn("🧠 处理器", edit_calls[-1]["text"])
-        self.assertNotIn("<tg-emoji", edit_calls[-1]["text"])
+        self.assertFalse([payload for method, payload in calls if method == "editMessageText"])
 
     def test_inline_delay_button_starts_background_generation(self):
         calls = []
